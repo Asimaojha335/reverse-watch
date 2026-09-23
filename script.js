@@ -18,15 +18,22 @@ let total = 0;        // length of the current countdown in ms
 let remaining = 0;    // ms left while paused / idle
 let endAt = 0;        // performance.now() value when the countdown ends
 let frameId = null;
+let safetyTimer = null; // fires the alarm even when the tab is in the background and animation frames are paused
+let audioCtx = null;
 
 const pad = (n) => String(n).padStart(2, "0");
 
+const MAX_SECONDS = 99 * 3600 + 59 * 60 + 59;
+
+// Extra minutes or seconds roll over (75 minutes becomes 1:15:00), capped at 99:59:59.
 function readInput() {
-  const clamp = (el, max) => Math.min(max, Math.max(0, parseInt(el.value, 10) || 0));
-  const h = clamp(hoursInput, 99);
-  const m = clamp(minutesInput, 59);
-  const s = clamp(secondsInput, 59);
-  return ((h * 60 + m) * 60 + s) * 1000;
+  const num = (el) => Math.max(0, parseInt(el.value, 10) || 0);
+  const seconds = Math.min(MAX_SECONDS, num(hoursInput) * 3600 + num(minutesInput) * 60 + num(secondsInput));
+  return seconds * 1000;
+}
+
+function normaliseInputs() {
+  writeInput(readInput() / 1000);
 }
 
 function writeInput(seconds) {
@@ -65,11 +72,23 @@ function setState(next) {
   if (next !== "running") document.title = next === "finished" ? `Time is up - ${BASE_TITLE}` : BASE_TITLE;
 }
 
+// Browsers only let audio start after a user gesture, so the context is created when Start is pressed.
+function unlockAudio() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!audioCtx && Ctx) audioCtx = new Ctx();
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  } catch {
+    /* audio is optional */
+  }
+}
+
 // A short three-beep alarm made with the Web Audio API (no audio file needed)
 function beep() {
   try {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new Ctx();
+    unlockAudio();
+    const ctx = audioCtx;
+    if (!ctx) return;
     [0, 0.35, 0.7].forEach((offset) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -81,7 +100,6 @@ function beep() {
       osc.start(ctx.currentTime + offset);
       osc.stop(ctx.currentTime + offset + 0.3);
     });
-    setTimeout(() => ctx.close(), 1500);
   } catch {
     /* audio is optional */
   }
@@ -95,7 +113,9 @@ function tick() {
 }
 
 function finish() {
+  if (state === "finished") return;
   cancelAnimationFrame(frameId);
+  clearTimeout(safetyTimer);
   frameId = null;
   remaining = 0;
   setState("finished");
@@ -114,15 +134,20 @@ function start() {
       message.textContent = "Please set a time greater than zero.";
       return;
     }
+    normaliseInputs();
   }
   message.textContent = "";
+  unlockAudio();
   endAt = performance.now() + remaining;
   setState("running");
   frameId = requestAnimationFrame(tick);
+  clearTimeout(safetyTimer);
+  safetyTimer = setTimeout(finish, remaining + 50);
 }
 
 function pause() {
   cancelAnimationFrame(frameId);
+  clearTimeout(safetyTimer);
   frameId = null;
   remaining = endAt - performance.now();
   setState("paused");
@@ -130,6 +155,7 @@ function pause() {
 
 function reset() {
   cancelAnimationFrame(frameId);
+  clearTimeout(safetyTimer);
   frameId = null;
   message.textContent = "";
   setState("idle");
@@ -162,6 +188,10 @@ inputs.forEach((input) =>
     }
   })
 );
+
+inputs.forEach((input) => input.addEventListener("change", () => {
+  if (state === "idle" || state === "finished") normaliseInputs();
+}));
 
 startBtn.addEventListener("click", toggle);
 resetBtn.addEventListener("click", reset);
